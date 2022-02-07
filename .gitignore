@@ -1,0 +1,9 @@
+*.bak
+*.so
+*~
+*.json
+.idea
+cmake-config-*
+__pycache__
+*.pyc
+*.pyo
