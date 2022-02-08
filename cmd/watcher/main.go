@@ -51,7 +51,7 @@ func main() {
 	actions := make(chan Command)
 
 	for i := 0; i < len(cfg.Monitor); i++ {
-		go WatcherLoop(cfg.Monitor[i], actions)
+		go WatcherLoop(cfg.Monitor[i], actions, cfg.Verbose)
 	}
 	go ActionLoop(actions)
 	<-done
@@ -73,7 +73,7 @@ func IsExcluded(input string, exclusions []string) bool {
 	return false
 }
 
-func WatcherLoop(target watcher.Monitor, actions chan Command) {
+func WatcherLoop(target watcher.Monitor, actions chan Command, verbose bool) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatalf("Unable to create filesystem watcher")
@@ -101,7 +101,7 @@ func WatcherLoop(target watcher.Monitor, actions chan Command) {
 	isDir := func(path string) bool {
 		info, err := os.Stat(path)
 		if err != nil {
-			log.Printf("Unable to state %s, %v", path, err)
+			log.Printf("Unable to stat %s, %v", path, err)
 			return false
 		}
 		return info.IsDir()
@@ -111,7 +111,9 @@ func WatcherLoop(target watcher.Monitor, actions chan Command) {
 		doRemove := func(path string) {
 			delete(directories, path)
 			_ = w.Remove(path)
-			log.Println("No longer watching", path)
+			if verbose {
+				log.Println("No longer watching", path)
+			}
 		}
 		if !isKnownDir(root) {
 			return
@@ -138,7 +140,9 @@ func WatcherLoop(target watcher.Monitor, actions chan Command) {
 				log.Fatalf("Unable to watch %s, %v", path, e)
 			}
 			directories[path] = true
-			log.Println("Watching", path)
+			if verbose {
+				log.Println("Watching", path)
+			}
 			return nil
 		})
 	}
@@ -157,7 +161,9 @@ func WatcherLoop(target watcher.Monitor, actions chan Command) {
 			if IsExcluded(event.Name, target.Exclude) {
 				continue
 			}
-			log.Println("event: ", event)
+			if verbose {
+				log.Println("event: ", event)
+			}
 			if event.Op&fsnotify.Write == fsnotify.Write {
 				log.Println("modified file:", event.Name)
 			}
@@ -182,11 +188,37 @@ func WatcherLoop(target watcher.Monitor, actions chan Command) {
 }
 
 func ActionLoop(actions chan Command) {
-	for {
+	pending := make(map[string]Command, 0)
+
+	readAtLeastOne := func() {
 		select {
 		case a := <-actions:
-			runCommand(a)
+			pending[a.WorkingDirectory] = a
 		}
+	}
+	readAllAvailable := func() {
+		for {
+			select {
+			case a := <-actions:
+				pending[a.WorkingDirectory] = a
+			default:
+				return
+			}
+		}
+	}
+	clearPending := func() {
+		pending = make(map[string]Command, 0)
+	}
+
+	for {
+		if len(pending) == 0 {
+			readAtLeastOne()
+		}
+		readAllAvailable()
+		for _, command := range pending {
+			runCommand(command)
+		}
+		clearPending()
 	}
 }
 

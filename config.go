@@ -8,4 +8,5 @@ type Monitor struct {
 
 type Config struct {
 	Monitor []Monitor `json:"monitor"`
+	Verbose bool      `json:"verbose,omitempty"`
 }
