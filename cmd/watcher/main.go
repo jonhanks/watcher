@@ -8,6 +8,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/jonhanks/watcher"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -78,7 +79,71 @@ func WatcherLoop(target watcher.Monitor, actions chan Command) {
 		log.Fatalf("Unable to create filesystem watcher")
 	}
 	defer w.Close()
-	err = w.Add(target.Directory)
+
+	directories := make(map[string]bool, 100)
+
+	isKnownDir := func(name string) bool {
+		_, ok := directories[name]
+		return ok
+	}
+	isCreate := func(event fsnotify.Event) bool {
+		return event.Op&fsnotify.Create == fsnotify.Create
+	}
+	//isWrite := func(event fsnotify.Event) bool {
+	//	return event.Op&fsnotify.Write == fsnotify.Write
+	//}
+	isRemove := func(event fsnotify.Event) bool {
+		return event.Op&fsnotify.Remove == fsnotify.Remove
+	}
+	isRename := func(event fsnotify.Event) bool {
+		return event.Op&fsnotify.Rename == fsnotify.Rename
+	}
+	isDir := func(path string) bool {
+		info, err := os.Stat(path)
+		if err != nil {
+			log.Printf("Unable to state %s, %v", path, err)
+			return false
+		}
+		return info.IsDir()
+	}
+
+	removeDir := func(root string) {
+		doRemove := func(path string) {
+			delete(directories, path)
+			_ = w.Remove(path)
+			log.Println("No longer watching", path)
+		}
+		if !isKnownDir(root) {
+			return
+		}
+		doRemove(root)
+		prefix := root + string(os.PathSeparator)
+		for path, _ := range directories {
+			if strings.HasPrefix(path, prefix) {
+				doRemove(path)
+			}
+		}
+
+	}
+
+	addDir := func(root string) {
+		filepath.Walk(root, func(path string, info fs.FileInfo, err error) error {
+			if !info.IsDir() {
+				return nil
+			}
+			if IsExcluded(path, target.Exclude) {
+				return filepath.SkipDir
+			}
+			if e := w.Add(path); e != nil {
+				log.Fatalf("Unable to watch %s, %v", path, e)
+			}
+			directories[path] = true
+			log.Println("Watching", path)
+			return nil
+		})
+	}
+	addDir(target.Directory)
+
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -96,6 +161,13 @@ func WatcherLoop(target watcher.Monitor, actions chan Command) {
 			if event.Op&fsnotify.Write == fsnotify.Write {
 				log.Println("modified file:", event.Name)
 			}
+			if isCreate(event) && isDir(event.Name) {
+				addDir(event.Name)
+			}
+			if (isRename(event) || isRemove(event)) && isKnownDir(event.Name) {
+				removeDir(event.Name)
+			}
+
 			actions <- Command{
 				Action:           target.Action,
 				WorkingDirectory: target.Directory,
